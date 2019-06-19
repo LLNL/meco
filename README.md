@@ -1,6 +1,6 @@
 ---
 title: meco, a microbial ecology toy library
-author: Aram Avila-Herrera
+author: Aram Avila-Herrera (avilaherrera1@llnl.gov)
 ---
 
 # MECO
@@ -10,4 +10,11 @@ sequencing count data.
 
 # License
 
-MIT <https://github.com/ropensci/unconf17/issues/32#issuecomment-296208427>
+MIT unless GPL depending on how strictly GPL is interpreted.
+
+# Dependencies
+
+- tidyverse packages
+- phyloseq
+- ggbeeswarm
+
