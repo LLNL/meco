@@ -20,3 +20,6 @@ lmat_clr <- list(genus = lmat_genus, species = lmat_species) %>%
      denom = 'zero', useMC = TRUE
    )
   })
+
+lmat_clr %>%
+  iwalkh(~ print(head(.x)), level = 3, tabset = T)
