@@ -2,8 +2,10 @@
 # Includes some ALDEx2 helpers
 
 require(tidyverse)
-require(magrittr)
-require(glue)
+require(reshape2)
+require(ALDEx2)
+require(furrr)
+require(assertthat)
 
 #' Selects read counts for microbial taxa only
 #'
@@ -27,213 +29,128 @@ keep_lmat_microbes <- function(lmat) {
 sum_lmat_at_rank <- function(lmat, tax_rank = genus, keep_unknowns = FALSE) {
   tax_rank <- enquo(tax_rank) # Hadley's dark magic, see vignette("programming")
   lmat_sum <- lmat %>%
-    count(sample, !!tax_rank, wt = read_count) %>%
-    rename(read_count = n) %>%
-    complete(sample, !!tax_rank, fill = list(read_count = 0.0))
+    group_by(sample, !!tax_rank) %>%
+    summarize(
+      read_count = sum(read_count, na.rm = TRUE),
+      avg_read_score = sum(total_read_score) / read_count
+    ) %>%
+    ungroup() %>%
+    complete(sample, !!tax_rank, fill = list(read_count = 0.0, avg_read_score = -Inf))
   if (keep_unknowns) {
-    lmat_sum %<>%
-      mutate(!!tax_rank := ifelse(is.na(!!tax_rank), "UNKNOWN", !!tax_rank))
+    lmat_sum <- lmat_sum %>%
+      replace_na(list("UNKNOWN") %>% set_names(quo_name(tax_rank)))
   } else {
-    lmat_sum %<>%
-      filter(!is.na(!!tax_rank))
+    lmat_sum <- lmat_sum %>% filter(!is.na(!!tax_rank))
   }
   lmat_sum
 }
 
-#' Convert a tibble to a parameter list to pass to ALDEx2
+#' Calls aldex.clr on all samples in a long-form nested table
 #'
-#' @param lmat tibble of read counts per taxon per sample
-#' @param samp tibble with sample metadata
-#' @param tax_rank genus, species, etc... as a bare word
-#' @param keep_all add dummy uniform sample to keep all taxa
-#' @param ... sample grouping variables as bare names
-#' @param denom which taxa to use in calculating means
-#'
-#' It's probably better to convert lmat and sample data to a phyloseq object...
-#'
-#' Returns a list of parameters to pass to `aldex.clr`, and extra information
-#' and extra information about the original tibble.
-#'
-#' `reads`: a data.frame with rows = taxa, columns = samples
-#'
-#'          ALDEx2 will mess up sample names with nonsyntactic characters
-#'          Original sample names are stored in `$original_samplenames`
-#'
-#' `conds`: a character vector of sample group names
-#'
-#' `denom`: denom
-#'
-#'          \code{denom}: ALDEx2 will estimate the average relative abundance
-#'          (geometric mean) per sample using features chosen by `denom`. By
-#'          default `denom` computes the geometric mean using all features
-#'          (taxa), but can select different features per condition. `denom =
-#'          "iqlr"` will select features with interquartile clr variance within
-#'          each condition, i.e., taxa that don't vary too much or too little
-#'          within each condition.  `denom = "zero"` will select taxa that are
-#'          non-zero within each condition.
-#'
-gen_aldex_params <- function(lmat, samp, tax_rank, ..., keep_all = FALSE,
-                             denom = "all") {
-  require(ALDEx2)
-  require(reshape2)
+#' @param d A long-form dataframe with samples, features, counts, [groupin variable | covariates]
+#' @param formula A formula as if you were to call aldex.clr(conds = model.matrix(formula))
+#' @param ... Additional aldex.clr parameters
+#' @param feature Column name in `d` with feature names
+#' @param sample Column name in `d` with sample names
+#' @param value.var Column name in `d` with read counts
+#' @param fill Value to fill for missing features
+aldex_clr <- function(d, formula, ..., feature = "genus",
+                      sample = "sample", value.var = "read_count", fill = 0) {
+  message("aldex.glm only works with denom = 'all' and conds = model.matrix()")
+  message("Working around aldex.glm requirements")
 
-  tax_rank <- enquo(tax_rank)
-  group_conds <- quos(...)
+  covarterms <- attr(terms(formula), "term.labels")
+  if (length(covarterms) > 1) warning("Workaround supports only one term")
+  covariates <- distinct(d, !!sym(sample), !!!syms(covarterms))
+  conditions <- transmute(covariates, !!sym(sample), paste(!!!syms(covarterms))) %>% deframe()
 
-  # remove samples not in samp from lmat and vice-versa
-  kp <- intersect(lmat$sample, samp$sample)
-  lmat %<>% filter(sample %in% kp)
-  samp %<>% filter(sample %in% kp)
+  fmla_data <- reformulate(sample, feature)
+  df_tidy <-
+    reshape2::dcast(d, fmla_data, value.var = value.var, fill = fill) %>%
+    tibble::column_to_rownames(feature)
+  df_tidy <- df_tidy[, names(conditions)] # reorder columns
 
-  ## rows are taxa, columns are samples
-  lmat_wide <- lmat %>%
-    select(sample, !!tax_rank, read_count) %>%
-    reshape2::dcast(
-      glue("{quo_name(tax_rank)} ~ sample"),
-      value.var = 'read_count',
-      fill = 0
-    ) %>%
-    remove_rownames() %>%
-    column_to_rownames(quo_name(tax_rank))
+  assertthat::assert_that(all(colnames(df_tidy) == names(conditions)))
 
-  # conds only matters for denom = "iqlr" or "zero"
-  if (...length() > 0) {
-    conds <- samp %>%
-      transmute(sample, cond = paste0(!!!group_conds)) %>%
-      deframe()
-    conds <- conds[colnames(lmat_wide)]
-  } else {
-    conds <- rep("allsamples", ncol(lmat_wide))
-  }
-  if (keep_all) {
-    # prevents dropping of study-wide 0s by adding a sample w/ 1 ct per taxon
-    lmat_wide %<>% mutate(dummy = 1)
-    conds <- c(conds, "dummy" = "dummy")
-  }
-
-  # ***ALDEx2 CHANGES SOME SAMPLE NAMES ("-" to ".")***
-  original_samplenames <- colnames(lmat_wide) %>% setNames(make.names(.))
-  aldex_params <- list(
-    reads = lmat_wide,
-    conds = conds,
-    denom = denom,
-    tax_rank = quo_name(tax_rank),
-    original_samplenames = original_samplenames,
-    keep_all = keep_all
-  )
-  aldex_params
+  # mm <- model.matrix(formula, covariates)
+  # aldex.clr(df_tidy, mm, ...)  # doesn't work with denom = 'zero'
+  aldex.clr(df_tidy, conditions, ...) # doesn't work with aldex.glm
 }
 
-#' Converts an ALDEx2 clr object to long-form tibble
+#' aldex.glm workaround
 #'
-#' @param mc aldex.clr output, contains a list of Monte Carlo instances.
-#'           Each list element is a sample, and contains a matrix with rows =
-#'           taxa, cols = MC instance.  Note: list is not in the original
-#'           sample order
+#' @param clr An aldex.clr object
 #'
-#' @param aldex_params list of params generated by `gen_aldex_params`
-#'
-#' Taxon proportions are drawn many times (default 128) per sample, then clr
-#' transformed using the the features selected within each condition (`denom`)
-#' I take the mean as a point estimate and reshape into a long-form tibble with
-#' columns `sample`, aldex_params$tax_rank, glue("clr_{aldex_params$denom}")
-melt_aldexclr <- function(mc, aldex_params){
-  require(ALDEx2)
-
-  tax_rank <- sym(aldex_params$tax_rank)  # What have I become?
-
-  mclst <- getMonteCarloInstances(mc)  # has modified sample names
-  names(mclst) <- aldex_params$original_samplenames[names(mclst)]  # restore
-
-  clr_wide <- mclst %>%
-    imap(~{
-      rowMeans(.x) %>%
-      enframe(name = quo_name(tax_rank), value = .y)
-    }) %>%
-    reduce(inner_join, by = quo_name(tax_rank))
-
-  if (aldex_params$keep_all) {
-    clr_wide %<>% select(-one_of("dummy"))
+#' Returns a dataframe with feature, kw.ep, glm.ep, kw.eBH, glm.eBH
+aldex_glm <- function(clr) {
+  glmdrop1 <- function(...) {
+    glm(...) %>%
+      drop1(test = "Chisq") %>%
+      {
+        suppressWarnings(broom::tidy(.))
+      } %>%
+      filter(term == "condition") %>%
+      pull(p.value)
   }
-
-  if (!is.null(aldex_params$denom)) {
-    clr_denom <- glue("clr_{aldex_params$denom}")
-  } else {
-    clr_denom <- "clr"
+  kw <- function(...) {
+    kruskal.test(...) %>%
+      broom::tidy() %>%
+      pull(p.value)
   }
+  try_glm <- possibly(glmdrop1, otherwise = NA)
+  try_kw <- possibly(kw, otherwise = NA)
 
-  clr_long <- clr_wide %>%
-    gather(sample, !!sym(clr_denom), -!!tax_rank) %>%
-    select(sample, !!tax_rank, !!sym(clr_denom))
-  clr_long
+  # Gets a named list of length NSAMPLES containing
+  # matrices of dimension NFEATURES x NINSTANCES.
+  mc <- getMonteCarloInstances(clr) # has sample names
+  d_cond <- enframe(clr@conds, name = "sample", value = "condition")
+  # matrix row names are feature names
+  d_mc <-
+    mc %>%
+    imap_dfr(
+      ~ reshape2::melt(.x, varnames = c("feature", "replicate"), value.name = "clr"),
+      .id = "sample"
+    )
+  d_mc <- left_join(d_mc, d_cond, by = "sample")
+
+  fmla <- clr ~ condition
+
+  # split-apply-combine dataframe for furrr
+  oldplan_ <- future::plan()
+  future::plan(future::multiprocess)
+  d_mdl <- d_mc %>%
+    split(.[, c("feature", "replicate")], sep = "_._") %>%
+    furrr::future_map_dfr(~ tibble(
+      glm_p = try_glm(data = .x, formula = fmla),
+      kw_p = try_kw(formula = fmla, data = .x)
+    ), .id = "grp", .progress = TRUE)
+  future::plan(oldplan_)
+
+  d_mdl <- d_mdl %>%
+    tidyr::separate(grp, c("feature", "replicate"), sep = "_\\._")
+  d_mdl %>%
+    group_by(replicate) %>%
+    mutate_at(vars(kw_p, glm_p), list(adj = ~ p.adjust(.x, method = "fdr"))) %>%
+    group_by(feature) %>%
+    summarize(
+      kw.ep = mean(kw_p, na.rm = TRUE),
+      glm.ep = mean(glm_p, na.rm = TRUE),
+      kw.eBH = mean(kw_p_adj, na.rm = TRUE),
+      glm.eBH = mean(glm_p_adj, na.rm = TRUE)
+    )
 }
 
-#' Transform counts in an LMAT tibble with aldex.clr
+#' Extracts clr point estimates to a long-from tibble
 #'
-#' @param lmat tibble of read counts per taxon per sample
-#' @param samp tibble with sample metadata
-#' @param tax_rank genus, species, etc... as a bare word
-#' @param keep_all add dummy uniform sample to keep all taxa
-#' @param save_attr saves aldex montecarlo object and aldex.clr params as
-#'        attributes
-#' @param ... sample grouping variables as bare names
-#' @param denom which taxa to use in calculating means
-#' @param useMC tell ALDEx2 to "use multicore"
+#' @param clr An aldex.clr object
+#' @param feature Name of the model features ("genus" or "species")
+#' @param value.var Name of clr column (e.g., "clr_zero", "clr", etc...)
 #'
-#' Returns a tibble with columns: "sample", quo_name(tax_rank), glue("clr_{denom}")
-clrtransform_lmat <- function(lmat, samp, ..., tax_rank, keep_all = FALSE,
-                              save_attr = FALSE, denom = "all", useMC = TRUE) {
-  require(ALDEx2)
-
-  tax_rank <- enquo(tax_rank)
-
-  aldex_params <- gen_aldex_params(
-    lmat = lmat, samp = samp, tax_rank = !!tax_rank, ...,
-    denom = denom, keep_all = keep_all
-  )
-
-  montecarlo <- aldex.clr(
-    reads = aldex_params$reads,
-    conds = aldex_params$conds,
-    denom = aldex_params$denom,
-    useMC = useMC
-  )
-  clr_long <- melt_aldexclr(montecarlo, aldex_params)
-  if(save_attr){
-    attributes(clr_long)$params <- aldex_params
-    attributes(clr_long)$mc <- montecarlo
-  }
-  clr_long
-}
-
-#' Subset an ALDEx2 MonteCarlo object
-#'
-#' @param mc a montecarlo object from aldex.clr
-#' @param keep_conds named vector of conditions, names are sample names
-#' @param ninstances number of montecarlo instances to keep
-#'
-#' For comparing only a subset of samples to each other
-#' using the first ninstances montecarlo instances.
-#'
-#' ALDEx2 montecarlo slots:
-#'   - @reads: data.frame with taxa as rows, samples as columns
-#'   - @mc.samples: number of montecarlo instances
-#'   - @verbose: logical
-#'   - @analysisData: list of matrices for each sample
-#'        - length: ncol(@reads)
-#'        - each matrix: montecarlo instance with taxa as rows and
-#'                       @mc.samples columns
-#'   - @conds: character vector grouping samples by condition
-#'   - @denom: list of numeric vectors indicating which taxa were used
-#'             to calculate the mean for each condition
-#'   - @useMC: logical, use multiple cores?
-subset_mc <- function(mc, keep_conds, ninstances = mc@mc.samples){
-  mangled_samplenames <- make.names(names(keep_conds))
-  keep_conds <- as.character(keep_conds)  # enforce class and drop names
-  mc@reads <- mc@reads[, mangled_samplenames]
-  mc@mc.samples <- ninstances
-  mc@analysisData <- mc@analysisData[mangled_samplenames] %>%
-    map(~.x[, 1:ninstances])
-  mc@conds <- keep_conds
-  mc
+#' Returns a dataframe with sample, feature, clr
+extract_aldex_clr <- function(clr, feature = "genus", value.var = "clr") {
+  # Gets a named list of length NSAMPLES containing
+  # matrices of dimension NFEATURES x NINSTANCES.
+  mc <- getMonteCarloInstances(clr) # has sample names
+  # matrix row names are feature names
+  mc %>% imap_dfr(~ rowMeans(.x) %>% enframe(name = feature, value = value.var), .id = "sample")
 }
