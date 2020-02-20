@@ -13,13 +13,21 @@ lmat_microbes <- keep_lmat_microbes(lmat)
 
 lmat_genus <- sum_lmat_at_rank(lmat_microbes, genus)
 lmat_species <- sum_lmat_at_rank(lmat_microbes, species)
-lmat_clr <- list(genus = lmat_genus, species = lmat_species) %>%
+aldex_bytrt <-
+  list(genus = lmat_genus, species = lmat_species) %>%
+  map(left_join, samp, by = "sample") %>%
   imap(~{
-   clrtransform_lmat(
-     lmat = .x, samp = samp, treatment, tax_rank = !!sym(.y),
-     denom = 'zero', useMC = TRUE
+   aldex_clr(.x, ~ treatment,
+     useMC = TRUE, denom = 'zero', mc.samples = 3,
+     feature = .y
    )
   })
+lmat_clr <- imap(aldex_bytrt, ~ extract_aldex_clr(.x, feature = .y, value.var = "clr_zero"))
 
 lmat_clr %>%
-  iwalkh(~ print(head(.x)), level = 3, tabset = T)
+  hwalk(~ print(head(.x)), level = 3, tabset = TRUE)
+
+lmat_glm <- map(aldex_bytrt, aldex_glm)
+
+lmat_glm %>%
+  hwalk(~ print(head(.x)), level = 3, tabset = TRUE)
