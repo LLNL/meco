@@ -1,20 +1,22 @@
----
-title: meco, a microbial ecology toy library
-author: Aram Avila-Herrera (avilaherrera1@llnl.gov)
----
-
 # MECO
 
-A toy library for basic microbial ecology tasks using shotgun metagenomic
-sequencing count data.
+A toy R library for basic microbial ecology tasks.
+
+`source()` the code in `R/` to pick and choose functions to use in your code.
 
 # License
 
-MIT unless GPL depending on how strictly GPL is interpreted.
+MIT. See `LICENSE`.
 
 # Dependencies
 
-- tidyverse packages
-- phyloseq
-- ggbeeswarm
+- tidyverse
+- reshape2
+- glue
+- furrr
+- ALDEx2 (1.16)
+- assertthat
 
+# Release
+
+LLNL-CODE-784545
