@@ -6,6 +6,7 @@ require(glue)
 #' Maps a function to a list and prints a "#" header for each element
 #'
 #' For use with results='asis' within an RMarkdown document
+#' Based off of https://adv-r.hadley.nz/function-operators.html
 hwalk <- function(.x, .f, ..., level = 4, tabset = FALSE) {
   ff <- function(f) {
     force(f)

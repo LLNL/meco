@@ -47,7 +47,7 @@ sum_lmat_at_rank <- function(lmat, tax_rank = genus, keep_unknowns = FALSE) {
 
 #' Calls aldex.clr on all samples in a long-form nested table
 #'
-#' @param d A long-form dataframe with samples, features, counts, [groupin variable | covariates]
+#' @param d A long-form dataframe with samples, features, counts, [grouping variable | covariates]
 #' @param formula A formula as if you were to call aldex.clr(conds = model.matrix(formula))
 #' @param ... Additional aldex.clr parameters
 #' @param feature Column name in `d` with feature names
